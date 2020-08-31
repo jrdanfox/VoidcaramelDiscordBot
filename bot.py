@@ -15,6 +15,9 @@ async def on_ready():
     print(f'{client.user} has connected to Discord!')
 
 
+# Bot line for Isaac and Matt's RNG
+
+
 @client.event
 async def on_message(message):
     rand = random.randint(0, 100)
@@ -24,5 +27,11 @@ async def on_message(message):
         await message.channel.send(f'Eat my booty {message.author.mention}')
     if rand == 1 and message.author.name in ['Arise Matt', 'Isaac Dumitru']:
         await message.channel.send(f'You are the definition of birth control {message.author.mention}')
+
+    random_year = rand/4
+    print(f'Command received from: {message.author}')
+    print(f'Random Number: {rand}')
+    if message.content == "!Dad":
+        await message.channel.send(f"Dallas' dad has been at the store for %d years" % random_year)
 
 client.run(TOKEN)
