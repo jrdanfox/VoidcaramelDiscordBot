@@ -9,4 +9,4 @@ A .env file is required in the root directory of this project. This file require
 
 #### Commands
 
-- !Dad: Gives a random number on how long Dallas' Dad has been gone
+- !dad: Gives a random number on how long Dallas' Dad has been gone
