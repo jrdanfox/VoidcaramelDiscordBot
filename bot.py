@@ -1,6 +1,9 @@
 import os
-
 import random
+
+from requests import Request, Session
+from requests.exceptions import ConnectionError, Timeout, TooManyRedirects
+import json
 
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -9,6 +12,7 @@ from user import User
 
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
+API_KEY = os.getenv('API_KEY')
 
 bot = commands.Bot(command_prefix='!')
 
@@ -18,6 +22,33 @@ USERS = []
 @bot.event
 async def on_ready():
     print(f'{bot.user} has connected to Discord!')
+
+
+@bot.command(name='price')
+async def gametime(ctx, symbol):
+    print('Got price command from: ' + ctx.author.name)
+    print('Getting price for symbol: ' + symbol)
+    url = 'https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest'
+    parameters = {
+        'symbol': symbol,
+        'convert': 'USD'
+    }
+    headers = {
+        'Accepts': 'application/json',
+        'X-CMC_PRO_API_KEY': API_KEY,
+    }
+
+    session = Session()
+    session.headers.update(headers)
+
+    try:
+        response = session.get(url, params=parameters)
+        data = json.loads(response.text)
+        print(data)
+        price = data.get('data').get(symbol).get('quote').get('USD').get('price')
+        await ctx.send(symbol + " price: $" + str(price))
+    except (ConnectionError, Timeout, TooManyRedirects) as e:
+        print(e)
 
 
 @bot.command(name='gametime')
@@ -76,5 +107,6 @@ async def on_member_update(before, after):
             USERS.append(user)
         else:  # This user is already in USERS, update gametime
             updated_member.update_game_start_time(datetime.now())
+
 
 bot.run(TOKEN)
