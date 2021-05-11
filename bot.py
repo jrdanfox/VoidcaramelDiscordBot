@@ -13,7 +13,7 @@ load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
 API_KEY = os.getenv('API_KEY')
 
-bot = commands.Bot(command_prefix='?')
+bot = commands.Bot(command_prefix='!')
 
 USERS = []
 
