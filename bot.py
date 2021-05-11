@@ -13,7 +13,7 @@ load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
 API_KEY = os.getenv('API_KEY')
 
-bot = commands.Bot(command_prefix='!')
+bot = commands.Bot(command_prefix='?')
 
 USERS = []
 
@@ -76,41 +76,48 @@ async def price(ctx, symbol):
 async def buy(ctx, symbol, amount: float):
     print('Got buy command from: ' + ctx.author.name)
     for user in USERS:
-        if user.name == ctx.author.name:
-            number_of_coins = get_number_of_coins(symbol, amount)
-            purchase = user.purchase(symbol, number_of_coins, amount)
-            if purchase is not "success":
-                await ctx.send(purchase)
+        if user.get_user_id() == ctx.author.id:
+            if amount <= 0:
+                await ctx.send("Cannot buy 0 or fewer coins.")
             else:
-                balance_formatted = "{:.2f}".format(user.balance)
-                await ctx.send(f"User {user.name} bought {amount} USD of {symbol}, "
-                               f"{number_of_coins} coins. Remaining balance: ${balance_formatted}")
+                number_of_coins = get_number_of_coins(symbol, amount)
+                purchase = user.purchase(symbol, number_of_coins, amount)
+                if purchase != "success":
+                    await ctx.send(purchase)
+                else:
+                    balance_formatted = "{:.2f}".format(user.get_balance())
+                    amount_formatted = "{:.2f}".format(amount)
+                    await ctx.send(f"{user.name} bought {amount_formatted} USD of {symbol}, "
+                                   f"{number_of_coins} coins. Remaining balance: ${balance_formatted}")
 
 
 @bot.command(name='sell')
 async def sell(ctx, symbol, amount):
     print('Got sell command from: ' + ctx.author.name)
     for user in USERS:
-        if user.name == ctx.author.name:
+        if user.get_user_id() == ctx.author.id:
             if amount == 'max':  # sell all of the coins
                 coins = user.get_balance_of_coin(symbol)
             else:
                 coins = float(amount)
-            price_of_coins = get_cost_of_coins(symbol, coins)
-            message = user.sell(symbol, coins, price_of_coins)
-            if message is not 'success':
-                await ctx.send(message)
+            if coins <= 0:
+                await ctx.send("Cannot sell 0 or fewer coins.")
             else:
-                price_of_coins_formatted = "{:.2f}".format(price_of_coins)
-                balance_formatted = "{:.2f}".format(user.get_balance())
-                await ctx.send(f"{user.name} successfully sold {symbol} for ${price_of_coins_formatted}. "
-                               f"Balance: {balance_formatted}")
+                price_of_coins = get_cost_of_coins(symbol, coins)
+                message = user.sell(symbol, coins, price_of_coins)
+                if message != 'success':
+                    await ctx.send(message)
+                else:
+                    price_of_coins_formatted = "{:.2f}".format(price_of_coins)
+                    balance_formatted = "{:.2f}".format(user.get_balance())
+                    await ctx.send(f"{user.name} successfully sold {symbol} for ${price_of_coins_formatted}. "
+                                   f"Balance: {balance_formatted}")
 
 
 @bot.command(name='balance')
 async def balance(ctx, symbol=None):
     for user in USERS:
-        if user.name == ctx.author.name:
+        if user.get_user_id() == ctx.author.id:
             if symbol is None:
                 usd = "{:.2f}".format(user.get_balance())
                 cryptos = ""
@@ -118,9 +125,9 @@ async def balance(ctx, symbol=None):
                     cryptos += crypto + ", "
                 cryptos = cryptos[0:len(cryptos) - 2]
                 if cryptos == "":
-                    await ctx.send(f"{user.name}'s balance is ${usd}")
+                    await ctx.send(f"{user.name}'s cash balance is ${usd}")
                 else:
-                    await ctx.send(f"{user.name}'s balance is ${usd}, current cryptos owned: {cryptos}")
+                    await ctx.send(f"{user.name}'s cash balance is ${usd}, current cryptos owned: {cryptos}")
             else:
                 crypto_balance = user.get_balance_of_coin(symbol)
                 if crypto_balance is not None:
@@ -134,7 +141,7 @@ async def balance(ctx, symbol=None):
 async def gametime(ctx):
     print('Got gametime command from: ' + ctx.author.name)
     for user in USERS:
-        if user.name == ctx.author.name:
+        if user.get_user_id() == ctx.author.id:
             if ctx.author.activity is not None and ctx.author.activity.type.name == 'playing':
                 elapsed_time = divmod((datetime.now() - user.current_game_start_time).seconds, 60)
                 await ctx.send(f"You've been in {ctx.author.activity.name.strip()} for {str(elapsed_time[0])} minutes, "
@@ -147,10 +154,10 @@ async def on_message(message):
     if message.author.name != 'VoidcaramelDiscordBot':
         found = False
         for user in USERS:
-            if user.name == message.author.name:
+            if user.user_id == message.author.id:
                 found = True
         if not found:
-            USERS.append(User(message.author.name))
+            USERS.append(User(message.author.id, message.author.name))
 
     # Check if this message is a command, and if it is evaluate it
     await bot.process_commands(message)
