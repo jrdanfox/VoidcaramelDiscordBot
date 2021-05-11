@@ -1,6 +1,7 @@
 class User:
 
-    def __init__(self, name):
+    def __init__(self, user_id, name):
+        self.user_id = user_id
         self.name = name
         self.balance = 5000
         self.current_game_start_time = None
@@ -15,6 +16,9 @@ class User:
     def get_balance(self):
         return self.balance
 
+    def get_user_id(self):
+        return self.user_id
+
     def get_owned_cryptos(self):
         cryptos = []
         for crypto in self.owned:
@@ -23,15 +27,16 @@ class User:
         return cryptos
 
     def purchase(self, symbol, amount, price):
-        if symbol in self.owned:
-            return "You already own this crypto."
+        if price > self.balance:
+            return "You don't have enough balance for this purchase."
         else:
-            if price > self.balance:
-                return "You don't have enough balance for this purchase."
+            if symbol in self.owned:
+                self.owned[symbol] += amount
+                self.balance -= price
             else:
                 self.owned[symbol] = amount
                 self.balance -= price
-                return "success"
+            return "success"
 
     def sell(self, symbol, amount, price):
         if symbol in self.owned:
