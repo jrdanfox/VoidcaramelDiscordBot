@@ -1,19 +1,24 @@
 import os
 
-from requests import Request, Session
+from pymongo import MongoClient
+
+from requests import Session
 from requests.exceptions import ConnectionError, Timeout, TooManyRedirects
 import json
 
 from discord.ext import commands
 from dotenv import load_dotenv
-from datetime import datetime
-from user import User
+import user
 
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
 API_KEY = os.getenv('API_KEY')
 
-bot = commands.Bot(command_prefix='!')
+# connect to MongoDB (configured in env)
+cluster = MongoClient(os.getenv('CONNECTION_URL'))
+db = cluster["voidcarameldiscordbot"]
+
+bot = commands.Bot(command_prefix=os.getenv('COMMAND_PREFIX'), help_command=None)
 
 USERS = []
 
@@ -45,8 +50,8 @@ def get_usd_for_symbol(symbol):
         data = json.loads(response.text)
         print(data)
         if data.get('status').get('error_message') is None:
-            usd = data.get('data').get(symbol).get('quote').get('USD').get('price')
-            change = data.get('data').get(symbol).get('quote').get('USD').get('percent_change_24h')
+            usd = data.get('data').get(symbol.upper()).get('quote').get('USD').get('price')
+            change = data.get('data').get(symbol.upper()).get('quote').get('USD').get('percent_change_24h')
     except (ConnectionError, Timeout, TooManyRedirects) as e:
         print(e)
 
@@ -74,120 +79,152 @@ async def price(ctx, symbol):
 
 @bot.command(name='buy')
 async def buy(ctx, symbol, amount: float):
-    print('Got buy command from: ' + ctx.author.name)
-    for user in USERS:
-        if user.get_user_id() == ctx.author.id:
-            if amount <= 0:
-                await ctx.send("Cannot buy 0 or fewer coins.")
+    print(f"Got buy command from: {ctx.author.name}")
+    if amount <= 0:
+        await ctx.send("Cannot buy 0 or fewer coins.")
+    else:
+        # decrease balance
+        users = db["users"]
+        query = {"_id": ctx.author.id}
+        this_user = users.find_one(query)
+        if this_user['balance'] >= amount:
+            new_balance_total = this_user['balance'] - amount
+            update = {"$set": {'balance': new_balance_total}}
+            users.update_one(query, update)
+
+            # increase coins
+            owned = db["owned"]
+            print(f"Checking for entry in {owned.name} for user {ctx.author.id}, symbol {symbol}")
+            query = {"user_id": ctx.author.id, "symbol": symbol}
+            result = owned.find_one(query)
+            number_of_coins = get_number_of_coins(symbol, amount)
+            if result is None:
+                post = {"user_id": ctx.author.id, "symbol": symbol, "amount": number_of_coins}
+                owned.insert_one(post)
+                print(f"Added new record for user {ctx.author.id}, symbol {symbol}, amount {number_of_coins}")
             else:
-                number_of_coins = get_number_of_coins(symbol, amount)
-                purchase = user.purchase(symbol, number_of_coins, amount)
-                if purchase != "success":
-                    await ctx.send(purchase)
-                else:
-                    balance_formatted = "{:.2f}".format(user.get_balance())
-                    amount_formatted = "{:.2f}".format(amount)
-                    await ctx.send(f"{user.name} bought {amount_formatted} USD of {symbol}, "
-                                   f"{number_of_coins} coins. Remaining balance: ${balance_formatted}")
+                new_coin_total = result['amount'] + number_of_coins
+                update = {"$set": {"amount": new_coin_total}}
+                owned.update_one(query, update)
+                print(f"Updated record for user {ctx.author.id}, symbol {symbol}, amount {new_coin_total}")
+
+            balance_formatted = "{:.2f}".format(new_balance_total)
+            amount_formatted = "{:.2f}".format(amount)
+            await ctx.send(f"{this_user['name']} bought {amount_formatted} USD of {symbol}, "
+                           f"{number_of_coins} coins. Remaining balance: ${balance_formatted}")
+        else:
+            balance_formatted = "{:.2f}".format(this_user['balance'])
+            await ctx.send(f"{this_user['name']} doesn't have enough balance for this purchase. "
+                           f"Balance: ${balance_formatted}")
 
 
 @bot.command(name='sell')
 async def sell(ctx, symbol, amount):
     print('Got sell command from: ' + ctx.author.name)
-    for user in USERS:
-        if user.get_user_id() == ctx.author.id:
-            if amount == 'max':  # sell all of the coins
-                coins = user.get_balance_of_coin(symbol)
-            else:
-                coins = float(amount)
-            if coins <= 0:
-                await ctx.send("Cannot sell 0 or fewer coins.")
-            else:
+    owned = db['owned']
+    query = {"user_id": ctx.author.id, "symbol": symbol}
+    result = owned.find_one(query)
+    if result is None:
+        await ctx.send(f"{ctx.author.name} does not own crypto with symbol {symbol}")
+    else:
+        if amount == 'max':
+            coins = result['amount']
+        else:
+            coins = float(amount)
+        if coins <= 0:
+            await ctx.send("Cannot sell 0 or fewer coins.")
+        else:
+            if result['amount'] >= coins:
                 price_of_coins = get_cost_of_coins(symbol, coins)
-                message = user.sell(symbol, coins, price_of_coins)
-                if message != 'success':
-                    await ctx.send(message)
-                else:
-                    price_of_coins_formatted = "{:.2f}".format(price_of_coins)
-                    balance_formatted = "{:.2f}".format(user.get_balance())
-                    await ctx.send(f"{user.name} successfully sold {symbol} for ${price_of_coins_formatted}. "
-                                   f"Balance: {balance_formatted}")
+                # decrease user coin count
+                new_coin_total = result['amount'] - coins
+                update = {"$set": {"amount": new_coin_total}}
+                owned.update_one(query, update)
+                print(f"Updated owned record for user {ctx.author.id}, symbol {symbol}, amount {new_coin_total}")
+
+                # increase user balance
+                users = db['users']
+                query = {'_id': ctx.author.id}
+                this_user = users.find_one(query)
+                new_balance_total = this_user['balance'] + price_of_coins
+                update = {"$set": {'balance': new_balance_total}}
+                users.update_one(query, update)
+                print(f"Updated users record for user {ctx.author.id} balance {new_balance_total}")
+
+                new_balance_total_formatted = "{:.2f}".format(new_balance_total)
+                await ctx.send(f"{ctx.author.name} successfully sold {coins} {symbol}.\n"
+                               f"Current {symbol} balance: {new_coin_total} coins.\n"
+                               f"Current cash balance: ${new_balance_total_formatted}")
+            else:
+                await ctx.send(f"{ctx.author.name} does not own enough {symbol} to sell {amount} coins. "
+                               f"Current {symbol} balance: {result['amount']} coins.")
 
 
 @bot.command(name='balance')
 async def balance(ctx, symbol=None):
-    for user in USERS:
-        if user.get_user_id() == ctx.author.id:
-            if symbol is None:
-                usd = "{:.2f}".format(user.get_balance())
-                cryptos = ""
-                for crypto in user.get_owned_cryptos():
-                    cryptos += crypto + ", "
-                cryptos = cryptos[0:len(cryptos) - 2]
-                if cryptos == "":
-                    await ctx.send(f"{user.name}'s cash balance is ${usd}")
-                else:
-                    await ctx.send(f"{user.name}'s cash balance is ${usd}, current cryptos owned: {cryptos}")
+    print(f"Got balance command from: {ctx.author.name}")
+    if symbol is None:
+        users = db['users']
+        query = {"_id": ctx.author.id}
+        this_user = users.find_one(query)
+        if this_user is None:
+            print(f"Attempting to add user {ctx.author.id} to DB")
+            post = {"_id": ctx.author.id, "name": ctx.author.name, 'balance': 5000}
+            users.insert_one(post)
+            print(f"Added user to DB: {post}")
+            await ctx.send(f"{ctx.author.name} has joined crypto paper trading! Your cash balance is $5000.00")
+        else:
+            print(f"Getting user {ctx.author.id} balance")
+            usd = "{:.2f}".format(this_user['balance'])
+
+            owned = db['owned']
+            cryptos = ""
+            for crypto in owned.find({'user_id': ctx.author.id}, {'_id': 0, 'symbol': 1, 'amount': 1}):
+                cryptos += crypto['symbol'] + ', '
+            cryptos = cryptos[0:len(cryptos) - 2]
+
+            if cryptos == "":
+                await ctx.send(f"{ctx.author.name}'s cash balance is ${usd}")
             else:
-                crypto_balance = user.get_balance_of_coin(symbol)
-                if crypto_balance is not None:
-                    usd = "{:.2f}".format(get_cost_of_coins(symbol, crypto_balance))
-                    await ctx.send(f"{user.name} owns {crypto_balance} coins of {symbol}, worth ${usd}")
-                else:
-                    await ctx.send(f"{user.name} does not own crypto with symbol {symbol}")
+                await ctx.send(f"{ctx.author.name}'s cash balance is ${usd}, current cryptos owned: {cryptos}")
+    else:
+        owned = db['owned']
+        query = {"user_id": ctx.author.id, "symbol": symbol}
+        result = owned.find_one(query)
+        if result is None:
+            await ctx.send(f"{ctx.author.name} does not own crypto with symbol {symbol}")
+        else:
+            crypto_balance = result['amount']
+            usd = "{:.2f}".format(get_cost_of_coins(symbol, crypto_balance))
+            await ctx.send(f"{ctx.author.name} owns {crypto_balance} coins of {symbol}, worth ${usd}")
 
 
-@bot.command(name='gametime')
-async def gametime(ctx):
-    print('Got gametime command from: ' + ctx.author.name)
-    for user in USERS:
-        if user.get_user_id() == ctx.author.id:
-            if ctx.author.activity is not None and ctx.author.activity.type.name == 'playing':
-                elapsed_time = divmod((datetime.now() - user.current_game_start_time).seconds, 60)
-                await ctx.send(f"You've been in {ctx.author.activity.name.strip()} for {str(elapsed_time[0])} minutes, "
-                               f"{str(elapsed_time[1])} seconds.")
+@bot.command(name='help')
+async def print_help(ctx):
+    help_message = "Welcome to the crypto paper trading bot. To start playing, use the !balance command to check " \
+                   "your balance and start investing in crypto.\n" \
+                   "\n" \
+                   "**Commands:**\n" \
+                   "\n" \
+                   "!buy <symbol> <amount> - buy <amount> USD of crypto with symbol <symbol>. We are using " \
+                   "CoinMarketCap to check prices, so make sure your crypto is listed there!\n" \
+                   "\n" \
+                   "!sell <symbol> <amount> - sell <amount> coins of crypto with symbol <symbol>.\n" \
+                   "\n" \
+                   "!balance - check your cash balance and get a list of the cryptos you currently own. This is also " \
+                   "how new users enroll and start playing.\n" \
+                   "\n" \
+                   "!balance <symbol> - check your current holdings of crypto with symbol <symbol>.\n" \
+                   "\n" \
+                   "!price <symbol> - get the price of the crypto with symbol <symbol> (via CoinMarketCap)."
+
+    await ctx.send(help_message)
 
 
 @bot.event
 async def on_message(message):
-    # check if this user is in USERS, adds them if not
-    if message.author.name != 'VoidcaramelDiscordBot':
-        found = False
-        for user in USERS:
-            if user.user_id == message.author.id:
-                found = True
-        if not found:
-            USERS.append(User(message.author.id, message.author.name))
-
     # Check if this message is a command, and if it is evaluate it
     await bot.process_commands(message)
-
-
-@bot.event
-async def on_member_update(before, after):
-    if before.activity is None:
-        print('before.activity is None')
-    else:
-        print(f'before.activity.type is {before.activity.type}')
-
-    if after.activity is None:
-        print('after.activity is None')
-    else:
-        print(f'after.activity.type is {after.activity.type}')
-
-    if (before.activity is None or not before.activity.type.name == 'playing') and \
-            (after.activity is not None and after.activity.type.name == 'playing'):
-        updated_member = None
-        for user in USERS:
-            if user.name == after.name:
-                updated_member = user
-
-        if updated_member is None:  # This user is not already in USERS, create a new User and update gametime
-            user = User(after.name)
-            user.update_game_start_time(datetime.now())
-            USERS.append(user)
-        else:  # This user is already in USERS, update gametime
-            updated_member.update_game_start_time(datetime.now())
 
 
 bot.run(TOKEN)
