@@ -5,6 +5,7 @@ from pymongo import MongoClient
 from requests import Session
 from requests.exceptions import ConnectionError, Timeout, TooManyRedirects
 import json
+import ccxt
 
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -30,30 +31,38 @@ async def on_ready():
 
 def get_usd_for_symbol(symbol):
     print('Getting price for symbol: ' + symbol)
-    usd = None
-    change = None
-    url = 'https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest'
-    parameters = {
-        'symbol': symbol,
-        'convert': 'USD'
-    }
-    headers = {
-        'Accepts': 'application/json',
-        'X-CMC_PRO_API_KEY': API_KEY,
-    }
+    exchange = ccxt.binance()
+    exchange.load_markets()
+    ticker = symbol + '/USDT'
+    if ticker in exchange.markets.keys():
+        ticker = exchange.fetch_ticker(ticker)
+        usd = (float(ticker['info']['askPrice']) + float(ticker['info']['bidPrice'])) / 2
+        change = float(ticker['info']['priceChangePercent'])
+    else:
+        usd = None
+        change = None
+        url = 'https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest'
+        parameters = {
+            'symbol': symbol,
+            'convert': 'USD'
+        }
+        headers = {
+            'Accepts': 'application/json',
+            'X-CMC_PRO_API_KEY': API_KEY,
+        }
 
-    session = Session()
-    session.headers.update(headers)
+        session = Session()
+        session.headers.update(headers)
 
-    try:
-        response = session.get(url, params=parameters)
-        data = json.loads(response.text)
-        print(data)
-        if data.get('status').get('error_message') is None:
-            usd = data.get('data').get(symbol.upper()).get('quote').get('USD').get('price')
-            change = data.get('data').get(symbol.upper()).get('quote').get('USD').get('percent_change_24h')
-    except (ConnectionError, Timeout, TooManyRedirects) as e:
-        print(e)
+        try:
+            response = session.get(url, params=parameters)
+            data = json.loads(response.text)
+            print(data)
+            if data.get('status').get('error_message') is None:
+                usd = data.get('data').get(symbol.upper()).get('quote').get('USD').get('price')
+                change = data.get('data').get(symbol.upper()).get('quote').get('USD').get('percent_change_24h')
+        except (ConnectionError, Timeout, TooManyRedirects) as e:
+            print(e)
 
     return usd, change
 
@@ -178,15 +187,23 @@ async def balance(ctx, symbol=None):
             usd = "{:.2f}".format(this_user['balance'])
 
             owned = db['owned']
-            cryptos = ""
+            cryptos = "\n"
+            total = 0
             for crypto in owned.find({'user_id': ctx.author.id}, {'_id': 0, 'symbol': 1, 'amount': 1}):
-                cryptos += crypto['symbol'] + ', '
-            cryptos = cryptos[0:len(cryptos) - 2]
+                if crypto['amount'] != 0:
+                    value = crypto['amount'] * get_usd_for_symbol(crypto['symbol'])[0]
+                    total += value
+                    value_formatted = "{:.2f}".format(value)
+                    cryptos += f"{crypto['symbol']}: ${value_formatted}\n"
+            cryptos = cryptos[0:len(cryptos) - 1]
+            total += this_user['balance']
+            total_formatted = "{:.2f}".format(total)
 
             if cryptos == "":
                 await ctx.send(f"{ctx.author.name}'s cash balance is ${usd}")
             else:
-                await ctx.send(f"{ctx.author.name}'s cash balance is ${usd}, current cryptos owned: {cryptos}")
+                await ctx.send(f"{ctx.author.name}'s cash balance is ${usd}, net worth is ${total_formatted}\n"
+                               f"Current cryptos owned: {cryptos}")
     else:
         owned = db['owned']
         query = {"user_id": ctx.author.id, "symbol": symbol}
@@ -197,6 +214,34 @@ async def balance(ctx, symbol=None):
             crypto_balance = result['amount']
             usd = "{:.2f}".format(get_cost_of_coins(symbol, crypto_balance))
             await ctx.send(f"{ctx.author.name} owns {crypto_balance} coins of {symbol}, worth ${usd}")
+
+
+@bot.command(name='leaderboard')
+async def leaderboard(ctx):
+    print(f"Got leaderboard command from: {ctx.author.name}")
+    # get all user ids
+    users = db['users']
+    all_users = {}
+    found_price = {}
+    for this_user in users.find():
+        owned = db['owned']
+        total = 0
+        for crypto in owned.find({'user_id': this_user['_id']}):
+            if crypto['symbol'] in found_price:
+                total += found_price[crypto['symbol']] * crypto['amount']
+            else:
+                crypto_price = get_usd_for_symbol(crypto['symbol'])[0]
+                found_price[crypto['symbol']] = crypto_price
+                total += crypto_price * crypto['amount']
+        all_users[this_user['name']] = this_user['balance'] + total
+    sorted_users = sorted(all_users.items(), key=lambda kv: kv[1], reverse=True)
+    print(f"Got leaderboard: {sorted_users}")
+
+    leaderboard_message = "Current standings:\n"
+    for participant in sorted_users:
+        formatted_total = "{:.2f}".format(participant[1])
+        leaderboard_message += f"{participant[0]} - ${formatted_total}\n"
+    await ctx.send(leaderboard_message[0:len(leaderboard_message) - 1])
 
 
 @bot.command(name='help')
