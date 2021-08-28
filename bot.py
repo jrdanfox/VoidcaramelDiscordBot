@@ -14,10 +14,11 @@ import user
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
 API_KEY = os.getenv('API_KEY')
+DATABASE = os.getenv('DATABASE')
 
 # connect to MongoDB (configured in env)
 cluster = MongoClient(os.getenv('CONNECTION_URL'))
-db = cluster["voidcarameldiscordbot"]
+db = cluster[DATABASE]
 
 bot = commands.Bot(command_prefix=os.getenv('COMMAND_PREFIX'), help_command=None)
 
@@ -87,17 +88,24 @@ async def price(ctx, symbol):
 
 
 @bot.command(name='buy')
-async def buy(ctx, symbol, amount: float):
+async def buy(ctx, symbol, amount):
     print(f"Got buy command from: {ctx.author.name}")
-    if amount <= 0:
+    users = db['users']
+    query = {"_id": ctx.author.id}
+    result = users.find_one(query)
+    if amount == 'max':
+        total = result['balance']
+    else:
+        total = float(amount)
+    if total <= 0:
         await ctx.send("Cannot buy 0 or fewer coins.")
     else:
         # decrease balance
         users = db["users"]
         query = {"_id": ctx.author.id}
         this_user = users.find_one(query)
-        if this_user['balance'] >= amount:
-            new_balance_total = this_user['balance'] - amount
+        if this_user['balance'] >= total:
+            new_balance_total = this_user['balance'] - total
             update = {"$set": {'balance': new_balance_total}}
             users.update_one(query, update)
 
@@ -106,7 +114,7 @@ async def buy(ctx, symbol, amount: float):
             print(f"Checking for entry in {owned.name} for user {ctx.author.id}, symbol {symbol}")
             query = {"user_id": ctx.author.id, "symbol": symbol}
             result = owned.find_one(query)
-            number_of_coins = get_number_of_coins(symbol, amount)
+            number_of_coins = get_number_of_coins(symbol, total)
             if result is None:
                 post = {"user_id": ctx.author.id, "symbol": symbol, "amount": number_of_coins}
                 owned.insert_one(post)
@@ -118,7 +126,7 @@ async def buy(ctx, symbol, amount: float):
                 print(f"Updated record for user {ctx.author.id}, symbol {symbol}, amount {new_coin_total}")
 
             balance_formatted = "{:.2f}".format(new_balance_total)
-            amount_formatted = "{:.2f}".format(amount)
+            amount_formatted = "{:.2f}".format(total)
             await ctx.send(f"{this_user['name']} bought {amount_formatted} USD of {symbol}, "
                            f"{number_of_coins} coins. Remaining balance: ${balance_formatted}")
         else:
