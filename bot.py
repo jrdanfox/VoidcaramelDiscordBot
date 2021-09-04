@@ -9,7 +9,6 @@ import ccxt
 
 from discord.ext import commands
 from dotenv import load_dotenv
-import user
 
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
@@ -180,6 +179,7 @@ async def sell(ctx, symbol, amount):
 @bot.command(name='balance')
 async def balance(ctx, symbol=None):
     print(f"Got balance command from: {ctx.author.name}")
+    user = None
     if symbol is None:
         users = db['users']
         query = {"_id": ctx.author.id}
@@ -191,37 +191,45 @@ async def balance(ctx, symbol=None):
             print(f"Added user to DB: {post}")
             await ctx.send(f"{ctx.author.name} has joined crypto paper trading! Your cash balance is $5000.00")
         else:
-            print(f"Getting user {ctx.author.id} balance")
-            usd = "{:.2f}".format(this_user['balance'])
-
-            owned = db['owned']
-            cryptos = "\n"
-            total = 0
-            for crypto in owned.find({'user_id': ctx.author.id}, {'_id': 0, 'symbol': 1, 'amount': 1}):
-                if crypto['amount'] != 0:
-                    value = crypto['amount'] * get_usd_for_symbol(crypto['symbol'])[0]
-                    total += value
-                    value_formatted = "{:.2f}".format(value)
-                    cryptos += f"{crypto['symbol']}: ${value_formatted}\n"
-            cryptos = cryptos[0:len(cryptos) - 1]
-            total += this_user['balance']
-            total_formatted = "{:.2f}".format(total)
-
-            if cryptos == "":
-                await ctx.send(f"{ctx.author.name}'s cash balance is ${usd}")
-            else:
-                await ctx.send(f"{ctx.author.name}'s cash balance is ${usd}, net worth is ${total_formatted}\n"
-                               f"Current cryptos owned: {cryptos}")
+            user = this_user
     else:
         owned = db['owned']
         query = {"user_id": ctx.author.id, "symbol": symbol}
         result = owned.find_one(query)
         if result is None:
-            await ctx.send(f"{ctx.author.name} does not own crypto with symbol {symbol}")
+            users = db['users']
+            query = {"name": symbol}
+            this_user = users.find_one(query)
+            if this_user is None:
+                await ctx.send(f"{ctx.author.name} does not own crypto with symbol {symbol}")
+            else:
+                user = this_user
         else:
             crypto_balance = result['amount']
             usd = "{:.2f}".format(get_cost_of_coins(symbol, crypto_balance))
             await ctx.send(f"{ctx.author.name} owns {crypto_balance} coins of {symbol}, worth ${usd}")
+    if user is not None:
+        print(f"Getting user {user['_id']} balance")
+        usd = "{:.2f}".format(user['balance'])
+
+        owned = db['owned']
+        cryptos = "\n"
+        total = 0
+        for crypto in owned.find({'user_id': user['_id']}, {'_id': 0, 'symbol': 1, 'amount': 1}):
+            if crypto['amount'] != 0:
+                value = crypto['amount'] * get_usd_for_symbol(crypto['symbol'])[0]
+                total += value
+                value_formatted = "{:.2f}".format(value)
+                cryptos += f"{crypto['symbol']}: ${value_formatted}\n"
+        cryptos = cryptos[0:len(cryptos) - 1]
+        total += user['balance']
+        total_formatted = "{:.2f}".format(total)
+
+        if cryptos == "":
+            await ctx.send(f"{user['name']}'s cash balance is ${usd}")
+        else:
+            await ctx.send(f"{user['name']}'s cash balance is ${usd}, net worth is ${total_formatted}\n"
+                           f"Current cryptos owned: {cryptos}")
 
 
 @bot.command(name='leaderboard')
