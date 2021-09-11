@@ -1,84 +1,83 @@
 import os
-
-from pymongo import MongoClient
-
-from requests import Session
-from requests.exceptions import ConnectionError, Timeout, TooManyRedirects
-import json
+import sys
+import logging
 import ccxt
-
-from discord.ext import commands
+from prices import Prices
+from pymongo import MongoClient
+from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
 load_dotenv()
+logging.basicConfig(format='%(asctime)s - %(message)s',
+                    stream=sys.stdout,
+                    level=logging.INFO)
+
 TOKEN = os.getenv('DISCORD_TOKEN')
-API_KEY = os.getenv('API_KEY')
 DATABASE = os.getenv('DATABASE')
 
 # connect to MongoDB (configured in env)
 cluster = MongoClient(os.getenv('CONNECTION_URL'))
 db = cluster[DATABASE]
 
-bot = commands.Bot(command_prefix=os.getenv('COMMAND_PREFIX'), help_command=None)
+bot = commands.Bot(command_prefix=os.getenv('COMMAND_PREFIX'),
+                   help_command=None)
 
-USERS = []
+PRICES = Prices()
+
+
+@tasks.loop(seconds=10)
+async def populate_crypto_prices():
+    users = db['users']
+    owned = db['owned']
+    cryptos = []
+    for user in users.find():
+        for crypto in owned.find({'user_id': user['_id'], 'amount': {'$gt': 0}}):
+            if crypto not in cryptos:
+                cryptos.append(crypto['symbol'])
+
+    logging.info(f'Fetching exchange info')
+    exchange = ccxt.binance()
+    exchange.load_markets()
+    tickers = []
+    values = {}  # ticker -> usd, change
+    for symbol in cryptos:
+        ticker = symbol + '/USDT'
+        tickers.append(ticker)
+    tickers = exchange.fetch_tickers(tickers)
+    logging.info(f'Getting price for tickers: {tickers}')
+    for ticker in tickers:
+        usd = (float(tickers[ticker]['info']['askPrice']) + float(tickers[ticker]['info']['bidPrice'])) / 2
+        change = float(tickers[ticker]['info']['priceChangePercent'])
+        values[ticker.replace('/USDT', '')] = usd, change
+    logging.info(f'Got prices: {values}')
+
+    PRICES.set_prices(values)
 
 
 @bot.event
 async def on_ready():
-    print(f'{bot.user} has connected to Discord!')
+    logging.info(f'{bot.user} has connected to Discord!')
 
 
-def get_usd_for_symbol(symbol):
-    print('Getting price for symbol: ' + symbol)
-    exchange = ccxt.binance()
-    exchange.load_markets()
-    ticker = symbol + '/USDT'
-    if ticker in exchange.markets.keys():
-        ticker = exchange.fetch_ticker(ticker)
-        usd = (float(ticker['info']['askPrice']) + float(ticker['info']['bidPrice'])) / 2
-        change = float(ticker['info']['priceChangePercent'])
-    else:
-        usd = None
-        change = None
-        url = 'https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest'
-        parameters = {
-            'symbol': symbol,
-            'convert': 'USD'
-        }
-        headers = {
-            'Accepts': 'application/json',
-            'X-CMC_PRO_API_KEY': API_KEY,
-        }
-
-        session = Session()
-        session.headers.update(headers)
-
-        try:
-            response = session.get(url, params=parameters)
-            data = json.loads(response.text)
-            print(data)
-            if data.get('status').get('error_message') is None:
-                usd = data.get('data').get(symbol.upper()).get('quote').get('USD').get('price')
-                change = data.get('data').get(symbol.upper()).get('quote').get('USD').get('percent_change_24h')
-        except (ConnectionError, Timeout, TooManyRedirects) as e:
-            print(e)
-
-    return usd, change
+def get_usd_for_symbols(symbols):
+    usd_values = {}
+    for symbol in symbols:
+        usd_values[symbol] = PRICES.get_price(symbol)
+    return usd_values
 
 
 def get_number_of_coins(symbol, usd):
-    return usd / get_usd_for_symbol(symbol)[0]
+    return usd / get_usd_for_symbols([symbol])[symbol][0]
 
 
 def get_cost_of_coins(symbol, amount):
-    return amount * get_usd_for_symbol(symbol)[0]
+    return amount * get_usd_for_symbols([symbol])[symbol][0]
 
 
 @bot.command(name='price')
 async def price(ctx, symbol):
-    print('Got price command from: ' + ctx.author.name)
-    usd, change = get_usd_for_symbol(symbol)
+    logging.info('Got price command from: ' + ctx.author.name)
+    usd, change = get_usd_for_symbols([symbol])
     if usd is not None:
         change_formatted = ("{:.1f}".format(change), "+" + "{:.1f}".format(change))[change > 0]
         await ctx.send(f"{symbol} price: ${str(usd)} ({change_formatted}%)")
@@ -88,11 +87,11 @@ async def price(ctx, symbol):
 
 @bot.command(name='buy')
 async def buy(ctx, symbol, amount):
-    print(f"Got buy command from: {ctx.author.name}")
+    logging.info(f"Got buy command from: {ctx.author.name}")
     users = db['users']
     query = {"_id": ctx.author.id}
     result = users.find_one(query)
-    if amount == 'max':
+    if amount.lower() == 'max':
         total = result['balance']
     else:
         total = float(amount)
@@ -110,19 +109,19 @@ async def buy(ctx, symbol, amount):
 
             # increase coins
             owned = db["owned"]
-            print(f"Checking for entry in {owned.name} for user {ctx.author.id}, symbol {symbol}")
+            logging.info(f"Checking for entry in {owned.name} for user {ctx.author.id}, symbol {symbol}")
             query = {"user_id": ctx.author.id, "symbol": symbol}
             result = owned.find_one(query)
             number_of_coins = get_number_of_coins(symbol, total)
             if result is None:
                 post = {"user_id": ctx.author.id, "symbol": symbol, "amount": number_of_coins}
                 owned.insert_one(post)
-                print(f"Added new record for user {ctx.author.id}, symbol {symbol}, amount {number_of_coins}")
+                logging.info(f"Added new record for user {ctx.author.id}, symbol {symbol}, amount {number_of_coins}")
             else:
                 new_coin_total = result['amount'] + number_of_coins
                 update = {"$set": {"amount": new_coin_total}}
                 owned.update_one(query, update)
-                print(f"Updated record for user {ctx.author.id}, symbol {symbol}, amount {new_coin_total}")
+                logging.info(f"Updated record for user {ctx.author.id}, symbol {symbol}, amount {new_coin_total}")
 
             balance_formatted = "{:.2f}".format(new_balance_total)
             amount_formatted = "{:.2f}".format(total)
@@ -136,7 +135,7 @@ async def buy(ctx, symbol, amount):
 
 @bot.command(name='sell')
 async def sell(ctx, symbol, amount):
-    print('Got sell command from: ' + ctx.author.name)
+    logging.info('Got sell command from: ' + ctx.author.name)
     owned = db['owned']
     query = {"user_id": ctx.author.id, "symbol": symbol}
     result = owned.find_one(query)
@@ -156,7 +155,7 @@ async def sell(ctx, symbol, amount):
                 new_coin_total = result['amount'] - coins
                 update = {"$set": {"amount": new_coin_total}}
                 owned.update_one(query, update)
-                print(f"Updated owned record for user {ctx.author.id}, symbol {symbol}, amount {new_coin_total}")
+                logging.info(f"Updated owned record for user {ctx.author.id}, symbol {symbol}, amount {new_coin_total}")
 
                 # increase user balance
                 users = db['users']
@@ -165,7 +164,7 @@ async def sell(ctx, symbol, amount):
                 new_balance_total = this_user['balance'] + price_of_coins
                 update = {"$set": {'balance': new_balance_total}}
                 users.update_one(query, update)
-                print(f"Updated users record for user {ctx.author.id} balance {new_balance_total}")
+                logging.info(f"Updated users record for user {ctx.author.id} balance {new_balance_total}")
 
                 new_balance_total_formatted = "{:.2f}".format(new_balance_total)
                 await ctx.send(f"{ctx.author.name} successfully sold {coins} {symbol}.\n"
@@ -178,17 +177,17 @@ async def sell(ctx, symbol, amount):
 
 @bot.command(name='balance')
 async def balance(ctx, symbol=None):
-    print(f"Got balance command from: {ctx.author.name}")
+    logging.info(f"Got balance command from: {ctx.author.name}")
     user = None
     if symbol is None:
         users = db['users']
         query = {"_id": ctx.author.id}
         this_user = users.find_one(query)
         if this_user is None:
-            print(f"Attempting to add user {ctx.author.id} to DB")
+            logging.info(f"Attempting to add user {ctx.author.id} to DB")
             post = {"_id": ctx.author.id, "name": ctx.author.name, 'balance': 5000}
             users.insert_one(post)
-            print(f"Added user to DB: {post}")
+            logging.info(f"Added user to DB: {post}")
             await ctx.send(f"{ctx.author.name} has joined crypto paper trading! Your cash balance is $5000.00")
         else:
             user = this_user
@@ -209,18 +208,21 @@ async def balance(ctx, symbol=None):
             usd = "{:.2f}".format(get_cost_of_coins(symbol, crypto_balance))
             await ctx.send(f"{ctx.author.name} owns {crypto_balance} coins of {symbol}, worth ${usd}")
     if user is not None:
-        print(f"Getting user {user['_id']} balance")
+        logging.info(f"Getting user {user['_id']} balance")
         usd = "{:.2f}".format(user['balance'])
 
         owned = db['owned']
         cryptos = "\n"
         total = 0
-        for crypto in owned.find({'user_id': user['_id']}, {'_id': 0, 'symbol': 1, 'amount': 1}):
-            if crypto['amount'] != 0:
-                value = crypto['amount'] * get_usd_for_symbol(crypto['symbol'])[0]
-                total += value
-                value_formatted = "{:.2f}".format(value)
-                cryptos += f"{crypto['symbol']}: ${value_formatted}\n"
+        owned_cryptos = {}
+        for crypto in owned.find({'user_id': user['_id'], 'amount': {'$gt': 0}}, {'_id': 0, 'symbol': 1, 'amount': 1}):
+            owned_cryptos[crypto['symbol']] = crypto['amount']
+        owned_crypto_prices = get_usd_for_symbols(owned_cryptos.keys())
+        for crypto in owned_cryptos:
+            value = owned_cryptos[crypto] * owned_crypto_prices[crypto][0]
+            total += value
+            value_formatted = "{:.2f}".format(value)
+            cryptos += f"{crypto}: ${value_formatted}\n"
         cryptos = cryptos[0:len(cryptos) - 1]
         total += user['balance']
         total_formatted = "{:.2f}".format(total)
@@ -234,24 +236,26 @@ async def balance(ctx, symbol=None):
 
 @bot.command(name='leaderboard')
 async def leaderboard(ctx):
-    print(f"Got leaderboard command from: {ctx.author.name}")
+    logging.info(f"Got leaderboard command from: {ctx.author.name}")
     # get all user ids
     users = db['users']
-    all_users = {}
-    found_price = {}
+    all_users = {}  # user -> total money
+    crypto_prices = []
+    user_owned = {}  # (user, symbol) -> amount
     for this_user in users.find():
         owned = db['owned']
-        total = 0
-        for crypto in owned.find({'user_id': this_user['_id']}):
-            if crypto['symbol'] in found_price:
-                total += found_price[crypto['symbol']] * crypto['amount']
-            else:
-                crypto_price = get_usd_for_symbol(crypto['symbol'])[0]
-                found_price[crypto['symbol']] = crypto_price
-                total += crypto_price * crypto['amount']
-        all_users[this_user['name']] = this_user['balance'] + total
+        all_users[this_user['name']] = this_user['balance']
+        for crypto in owned.find({'user_id': this_user['_id'], 'amount': {'$gt': 0}}):
+            if crypto not in crypto_prices:
+                crypto_prices.append(crypto['symbol'])
+            user_owned[(this_user['name'], crypto['symbol'])] = crypto['amount']
+
+    crypto_prices = get_usd_for_symbols(crypto_prices)
+    for user, symbol in user_owned:
+        all_users[user] = all_users[user] + (crypto_prices[symbol][0] * user_owned[user, symbol])
+
     sorted_users = sorted(all_users.items(), key=lambda kv: kv[1], reverse=True)
-    print(f"Got leaderboard: {sorted_users}")
+    logging.info(f"Got leaderboard: {sorted_users}")
 
     leaderboard_message = "Current standings:\n"
     for participant in sorted_users:
@@ -288,4 +292,6 @@ async def on_message(message):
     await bot.process_commands(message)
 
 
+populate_crypto_prices.before_loop(bot.wait_until_ready)
+populate_crypto_prices.start()
 bot.run(TOKEN)
