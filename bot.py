@@ -34,7 +34,16 @@ async def populate_crypto_prices():
         for crypto in owned.find({'user_id': user['_id'], 'amount': {'$gt': 0}}):
             if crypto not in cryptos:
                 cryptos.append(crypto['symbol'])
+    values = get_usd_from_api(cryptos)
+    PRICES.set_prices(values)
 
+
+@bot.event
+async def on_ready():
+    logging.info(f'{bot.user} has connected to Discord!')
+
+
+def get_usd_from_api(cryptos):
     logging.info(f'Fetching exchange info')
     exchange = ccxt.binance()
     exchange.load_markets()
@@ -50,19 +59,16 @@ async def populate_crypto_prices():
         change = float(tickers[ticker]['info']['priceChangePercent'])
         values[ticker.replace('/USDT', '')] = usd, change
     logging.info(f'Got prices: {values}')
-
-    PRICES.set_prices(values)
-
-
-@bot.event
-async def on_ready():
-    logging.info(f'{bot.user} has connected to Discord!')
+    return values
 
 
 def get_usd_for_symbols(symbols):
     usd_values = {}
-    for symbol in symbols:
-        usd_values[symbol] = PRICES.get_price(symbol)
+    if len(symbols) == 1 and not PRICES.has_price(symbols[0]):
+        usd_values = get_usd_from_api(symbols)
+    else:
+        for symbol in symbols:
+            usd_values[symbol] = PRICES.get_price(symbol)
     return usd_values
 
 
@@ -77,8 +83,9 @@ def get_cost_of_coins(symbol, amount):
 @bot.command(name='price')
 async def price(ctx, symbol):
     logging.info('Got price command from: ' + ctx.author.name)
-    usd, change = get_usd_for_symbols([symbol])
-    if usd is not None:
+    get_usd = get_usd_for_symbols([symbol])
+    if len(get_usd) > 0:
+        usd, change = get_usd[symbol]
         change_formatted = ("{:.1f}".format(change), "+" + "{:.1f}".format(change))[change > 0]
         await ctx.send(f"{symbol} price: ${str(usd)} ({change_formatted}%)")
     else:

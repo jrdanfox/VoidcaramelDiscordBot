@@ -8,3 +8,6 @@ class Prices:
 
     def set_prices(self, values):
         self.PRICES = values
+
+    def has_price(self, symbol):
+        return symbol in self.PRICES
