@@ -64,7 +64,7 @@ def get_usd_from_api(cryptos):
 
 def get_usd_for_symbols(symbols):
     usd_values = {}
-    if len(symbols) == 1 and not PRICES.has_price(symbols[0]):
+    if len(symbols) == 1 and not PRICES.has_price(list(symbols)[0]):
         usd_values = get_usd_from_api(symbols)
     else:
         for symbol in symbols:
