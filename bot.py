@@ -187,14 +187,19 @@ async def sell_all(ctx):
     owned = db['owned']
     users = db['users']
     price_of_owned_coins = 0
+    found_something = False
     for record in owned.find({'user_id': ctx.author.id, 'amount': {'$gt': 0}}):
-        coinCostDict = get_usd_for_symbols({record['symbol']})
-        coinPrice = list(coinCostDict.values())[0][0]
-        coinValue = coinPrice * record['amount']
-        price_of_owned_coins += coinValue
+        found_something = True
+        coin_cost_dict = get_usd_for_symbols([record['symbol']])
+        coin_price = list(coin_cost_dict.values())[0][0]
+        coin_value = coin_price * record['amount']
+        price_of_owned_coins += coin_value
         query = {'user_id': ctx.author.id, 'symbol': record['symbol']}
         updateCoins = {'$set': {'amount': 0}}
         owned.update_one(query, updateCoins)
+    if found_something is False:
+        await ctx.send(f'{ctx.author.name} has no cryptos to sell!')
+        return
     query = {'_id': ctx.author.id}
     user = users.find_one(query)
     new_balance_total = user['balance'] + price_of_owned_coins
@@ -203,6 +208,7 @@ async def sell_all(ctx):
     users.update_one(query, update)
     logging.info(f'Updated users record for user {ctx.author.id} balance {balance_total_formatted}')
     await ctx.send(f'{ctx.author.name} has sold everything!\nNew balance is ${balance_total_formatted}!')
+   
 
 
 @bot.command(name='balance')
