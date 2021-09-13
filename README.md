@@ -9,4 +9,4 @@ A .env file is required in the root directory of this project. This file require
 
 #### Commands
 
-- TODO: fill this out
+- Check available commands and their descriptions with the !help command.
