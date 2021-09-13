@@ -2,8 +2,9 @@ import os
 import sys
 import logging
 import ccxt
+from pymongo.message import query
 from prices import Prices
-from pymongo import MongoClient
+from pymongo import MongoClient, results
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
@@ -163,7 +164,6 @@ async def sell(ctx, symbol, amount):
                 update = {"$set": {"amount": new_coin_total}}
                 owned.update_one(query, update)
                 logging.info(f"Updated owned record for user {ctx.author.id}, symbol {symbol}, amount {new_coin_total}")
-
                 # increase user balance
                 users = db['users']
                 query = {'_id': ctx.author.id}
@@ -172,7 +172,6 @@ async def sell(ctx, symbol, amount):
                 update = {"$set": {'balance': new_balance_total}}
                 users.update_one(query, update)
                 logging.info(f"Updated users record for user {ctx.author.id} balance {new_balance_total}")
-
                 new_balance_total_formatted = "{:.2f}".format(new_balance_total)
                 await ctx.send(f"{ctx.author.name} successfully sold {coins} {symbol}.\n"
                                f"Current {symbol} balance: {new_coin_total} coins.\n"
@@ -180,6 +179,36 @@ async def sell(ctx, symbol, amount):
             else:
                 await ctx.send(f"{ctx.author.name} does not own enough {symbol} to sell {amount} coins. "
                                f"Current {symbol} balance: {result['amount']} coins.")
+
+
+@bot.command(name='sell_all')
+async def sell_all(ctx):
+    logging.info('Got sell_all command from: ' + ctx.author.name)
+    owned = db['owned']
+    users = db['users']
+    price_of_owned_coins = 0
+    found_something = False
+    for record in owned.find({'user_id': ctx.author.id, 'amount': {'$gt': 0}}):
+        found_something = True
+        coin_cost_dict = get_usd_for_symbols([record['symbol']])
+        coin_price = list(coin_cost_dict.values())[0][0]
+        coin_value = coin_price * record['amount']
+        price_of_owned_coins += coin_value
+        query = {'user_id': ctx.author.id, 'symbol': record['symbol']}
+        updateCoins = {'$set': {'amount': 0}}
+        owned.update_one(query, updateCoins)
+    if found_something is False:
+        await ctx.send(f'{ctx.author.name} has no cryptos to sell!')
+        return
+    query = {'_id': ctx.author.id}
+    user = users.find_one(query)
+    new_balance_total = user['balance'] + price_of_owned_coins
+    balance_total_formatted = '{:.2f}'.format(new_balance_total)
+    update = {'$set': {'balance': new_balance_total}}
+    users.update_one(query, update)
+    logging.info(f'Updated users record for user {ctx.author.id} balance {balance_total_formatted}')
+    await ctx.send(f'{ctx.author.name} has sold everything!\nNew balance is ${balance_total_formatted}!')
+   
 
 
 @bot.command(name='balance')
@@ -192,7 +221,7 @@ async def balance(ctx, symbol=None):
         this_user = users.find_one(query)
         if this_user is None:
             logging.info(f"Attempting to add user {ctx.author.id} to DB")
-            post = {"_id": ctx.author.id, "name": ctx.author.name, 'balance': 5000}
+            post = {"_id": ctx.author.id,"name": ctx.author.name, 'balance': 5000}
             users.insert_one(post)
             logging.info(f"Added user to DB: {post}")
             await ctx.send(f"{ctx.author.name} has joined crypto paper trading! Your cash balance is $5000.00")
@@ -259,7 +288,8 @@ async def leaderboard(ctx):
 
     crypto_prices = get_usd_for_symbols(crypto_prices)
     for user, symbol in user_owned:
-        all_users[user] = all_users[user] + (crypto_prices[symbol][0] * user_owned[user, symbol])
+        all_users[user] = all_users[user] + \
+            (crypto_prices[symbol][0] * user_owned[user, symbol])
 
     sorted_users = sorted(all_users.items(), key=lambda kv: kv[1], reverse=True)
     logging.info(f"Got leaderboard: {sorted_users}")
